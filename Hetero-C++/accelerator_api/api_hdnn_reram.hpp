@@ -2,11 +2,11 @@
 // into the simulation executable.
 #define DEBUG 1
 
-#include <iostream>
-#include <cstring>
-#include <random>
 #include <algorithm>
 #include <cassert>
+#include <cstring>
+#include <iostream>
+#include <random>
 
 struct config {
   int num_features;
@@ -39,6 +39,12 @@ public:
   uint32_t dim_hv;
   uint32_t num_class;
 
+  uint32_t cnt_enc;
+  uint32_t cnt_hamming_search;
+  uint32_t bits_data_read;
+  uint32_t bits_data_program;
+  uint32_t bits_data_write_sram;
+
   int16_t *feature_mem = nullptr;
   int16_t *class_mem = nullptr;
   int16_t *score_mem = nullptr;
@@ -60,6 +66,10 @@ public:
                         bool reram_comp);
   inline int readout_reram_bit(uint32_t i, uint32_t j);
   inline void program_reram_bit(bool inp_bit, uint32_t i, uint32_t j);
+  inline void update_class_hvs(int16_t *ptr_dst, int offset, uint64_t dim,
+                               bool if_add);
+
+  void calc_energy_runtime(float *energy_nJ, float *runtime_ns);
 };
 
 sim_hdnn_reram::sim_hdnn_reram(uint32_t dim_f, uint32_t dim_d, uint32_t num_c) {
@@ -82,6 +92,13 @@ sim_hdnn_reram::sim_hdnn_reram(uint32_t dim_f, uint32_t dim_d, uint32_t num_c) {
   printf("Initialized sim_hdnn_reram with %d features, %d HD dims. and %d "
          "classes...\n",
          dim_feature, dim_hv, num_class);
+
+  // Initialize performance counters
+  cnt_enc = 0;
+  cnt_hamming_search = 0;
+  bits_data_read = 0;
+  bits_data_program = 0;
+  bits_data_write_sram = 0;
 
 #ifdef DEBUG
   printf("f1=%d\tf2=%d\td1=%d\td2=%d\n", f1, f2, d1, d2);
@@ -119,15 +136,17 @@ void sim_hdnn_reram::allocate_feature_mem(int16_t *FeatureMem,
 }
 
 void sim_hdnn_reram::allocate_class_mem(int16_t *ClassMem, size_t NumBytes) {
-   std::memcpy(class_mem, ClassMem, NumBytes);
+  std::memcpy(class_mem, ClassMem, NumBytes);
 }
 
 void sim_hdnn_reram::read_class_mem(int16_t *ClassMem, size_t NumBytes) {
   std::memcpy(ClassMem, class_mem, NumBytes);
+  bits_data_read += (NumBytes * 8);
 }
 
 void sim_hdnn_reram::read_score_mem(int16_t *ScoreMem, size_t NumBytes) {
   std::memcpy(ScoreMem, this->score_mem, NumBytes);
+  bits_data_read += (NumBytes * 8);
 }
 
 void sim_hdnn_reram::dim_prime_fact() {
@@ -143,7 +162,6 @@ void sim_hdnn_reram::dim_prime_fact() {
     }
     n--;
   }
-
 
   // Decompose HV dim.
   n = sqrt(dim_hv);
@@ -222,6 +240,8 @@ void sim_hdnn_reram::enc_kronecker(int16_t *dst_ptr, int16_t *inp_feature) {
 
   if (tmp)
     delete[] tmp;
+
+  cnt_enc++;
 }
 
 inline int sim_hdnn_reram::adc_sensing(float inp) {
@@ -238,6 +258,21 @@ inline void sim_hdnn_reram::program_reram_bit(bool inp_bit, uint32_t i,
   // this->reram_array[i * this->dim_hv + j] =
   // inp_bit ? this->dist_lrs(this->rnd_gen) : this->dist_hrs(this->rnd_gen);
   this->reram_array[i * this->dim_hv + j] = inp_bit ? 1 : -1;
+
+  bits_data_program++;
+}
+
+inline void sim_hdnn_reram::update_class_hvs(int16_t *ptr_dst, int offset,
+                                             uint64_t dim, bool if_add) {
+
+  for (int j = 0; j < dim; j++) {
+    if (if_add)
+      class_mem[offset * dim + j] += ptr_dst[j];
+    else
+      class_mem[offset * dim + j] -= ptr_dst[j];
+  }
+
+  bits_data_write_sram += dim * 2;
 }
 
 void sim_hdnn_reram::hamming_distance(int16_t *result, int16_t *encoded_query,
@@ -252,4 +287,38 @@ void sim_hdnn_reram::hamming_distance(int16_t *result, int16_t *encoded_query,
       }
     }
   }
+
+  cnt_hamming_search++;
+}
+
+void sim_hdnn_reram::calc_energy_runtime(float *energy_nJ, float *runtime_ns) {
+  // Calculate energy
+  // float reram_out_nJ_per_op = 1 / (5.34 * 1e12 / 1e9); // nJ/op
+  // float reram_out_nJ_per_op = 1e3 / 4.23; // nJ/op
+  // float reram_out_nJ_per_op = 1.0/1000.0; // nJ/op
+  // float reram_program_nJ_per_bit = 5.0375;
+  // float asic_nJ_per_enc = (f1+d2)*f2*d1*0.02230; // nJ/op
+  // float sram_write_nJ_per_bit = 0.3125/1000.0;
+
+  // (*energy_nJ) =
+  //     (cnt_enc * asic_nJ_per_enc) +
+  //     (cnt_hamming_search * (num_class * dim_hv) * reram_out_nJ_per_op) +
+  //     (bits_data_write_sram * sram_write_nJ_per_bit) +
+  //     (bits_data_program * reram_program_nJ_per_bit) +
+  //     (bits_data_read * reram_out_nJ_per_op);
+
+  (*energy_nJ) = 0;
+
+  // Calculate runtime
+  float asic_ns_per_enc = (f1+d2)*f2*d1*1.0/192*4; // ns
+  float reram_ns_per_hamming = 1.0/128;
+  float reram_program_ns_per_bit = 800.0/512;
+  float reram_read_ns_per_bit = 1.0/6.0;
+  float sram_write_ns_per_bit = 4.0/64.0;
+
+  (*runtime_ns) = (cnt_enc * asic_ns_per_enc) +
+                  (cnt_hamming_search * (num_class * dim_hv) * reram_ns_per_hamming) +
+                  (bits_data_program * reram_program_ns_per_bit) +
+                  (bits_data_read * reram_read_ns_per_bit) +
+                  (bits_data_write_sram * sram_write_ns_per_bit);
 }
