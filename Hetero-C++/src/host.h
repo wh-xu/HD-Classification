@@ -11,8 +11,6 @@
 #include <iostream>
 #include <fstream>
 
-int train = 3; // number of training epochs (0 = inference)
-
 #define N_FEAT	        617 //feature per input (e.g., isolet: 617)
 #define N_CLASS		    26	//number of classes. (e.g., isolet: 26, ucihar 12)
 #define Dhv				2048  //hypervectors length
@@ -51,8 +49,3 @@ std::string  X_test_path = "../dataset/isolet_nq_testX.bin";
 std::string  y_test_path = "../dataset/isolet_nq_testY.bin";
 
 #endif
-
-std::string rp_matrix_path = "../dataset/rp_matrix.bin";
-
-std::string rp_matrix_txt = "../dataset/rp_matrix.txt";
-
